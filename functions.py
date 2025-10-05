@@ -3,16 +3,13 @@ import json
 import pandas as pd
 
 # --------------------------
-# ✅ Gemini client setup
+# Gemini client setup
 # --------------------------
 client = OpenAI(
     api_key=open('GEMINI_API_KEY.txt', 'r').read().strip(),
     base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
 )
 
-# --------------------------
-# 1. Initialize conversation (unchanged)
-# --------------------------
 def initialize_conversation():
     delimiter = "####"
     system_message = f"""
@@ -52,11 +49,6 @@ Start with: "Hello! I’m here to help you find the perfect laptop. Can you tell
 # 2. Gemini chat completion (enhanced with function calling)
 # --------------------------
 def get_chat_completions(messages, json_format=False, model="gemini-2.5-flash"):
-    """
-    Send messages to Gemini, optionally using JSON output.
-    ⚙️ Now supports Gemini-compatible function calling.
-    """
-    # --- Define function schemas Gemini can call ---
     tools = [
         {
             "type": "function",
@@ -84,14 +76,64 @@ def get_chat_completions(messages, json_format=False, model="gemini-2.5-flash"):
                     "required": ["user_req_string"]
                 }
             },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "validate_requirements",
+                "description": "Checks if user requirements dictionary is complete and valid.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"response_assistant": {"type": "string"}},
+                    "required": ["response_assistant"]
+                }
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "recommendation_validation",
+                "description": "Filters laptop recommendations to include only valid matches.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"laptop_recommendation": {"type": "string"}},
+                    "required": ["laptop_recommendation"]
+                }
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "summarize_recommendations",
+                "description": "Summarizes filtered laptop recommendations in an easy-to-read format.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"products": {"type": "string"}},
+                    "required": ["products"]
+                }
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "convert_currency",
+                "description": "Converts amount from a foreign currency to INR using fixed conversion rates.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "amount": {"type": "number"},
+                        "currency": {"type": "string"}
+                    },
+                    "required": ["amount", "currency"]
+                }
+            },
         }
     ]
 
-    # --- Default user start ---
+    # Default start if only system
     if len(messages) == 1 and messages[0]["role"] == "system":
         messages.append({"role": "user", "content": "Hello!"})
 
-    # --- Send request with tools ---
     response = client.chat.completions.create(
         model=model,
         messages=messages,
@@ -101,22 +143,24 @@ def get_chat_completions(messages, json_format=False, model="gemini-2.5-flash"):
 
     message = response.choices[0].message
 
-    # --- Detect function calls ---
     if hasattr(message, "tool_calls") and message.tool_calls:
         tool_call = message.tool_calls[0]
         fn_name = tool_call.function.name
         fn_args = json.loads(tool_call.function.arguments or "{}")
 
-        # Link available functions
         available_functions = {
             "dictionary_present": dictionary_present,
             "compare_laptops_with_user": compare_laptops_with_user,
+            "validate_requirements": intent_confirmation_layer,
+            "recommendation_validation": recommendation_validation,
+            "summarize_recommendations": lambda products: get_chat_completions(
+                initialize_conv_reco(products)
+            ),
+            "convert_currency": convert_currency
         }
 
         if fn_name in available_functions:
             result = available_functions[fn_name](**fn_args)
-
-            # --- Continue chat with function result ---
             messages.append(message)
             messages.append({
                 "role": "tool",
@@ -124,18 +168,13 @@ def get_chat_completions(messages, json_format=False, model="gemini-2.5-flash"):
                 "name": fn_name,
                 "content": json.dumps(result)
             })
-
             follow_up = client.chat.completions.create(model=model, messages=messages)
             return follow_up.choices[0].message.content
 
-    # --- No function call case ---
     msg = response.choices[0].message
     return json.loads(msg.content) if json_format else msg.content
 
 
-# --------------------------
-# 3–8. Your original methods remain unchanged
-# --------------------------
 def moderation_check(text):
     flagged_keywords = ["violence", "illegal", "hack"]
     for word in flagged_keywords:
@@ -221,6 +260,14 @@ def compare_laptops_with_user(user_req_string, laptop_csv='updated_laptop.csv'):
 def recommendation_validation(laptop_recommendation):
     data = json.loads(laptop_recommendation)
     return [d for d in data if d['Score'] > 2]
+
+def convert_currency(amount, currency):
+    conversion_rates = {
+        "USD": 83, "EUR": 90, "GBP": 104, "JPY": 0.56
+    }
+    rate = conversion_rates.get(currency.upper(), 83)
+    return {"amount_in_inr": round(amount * rate, 2)}
+
 
 
 def initialize_conv_reco(products):
